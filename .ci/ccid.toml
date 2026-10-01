@@ -1,0 +1,6 @@
+schema = 1
+project = "ctnd"
+
+[checks.lt-rooms]
+kind = "commands"
+commands = [["python3", ".ci/lt-rooms.py"]]

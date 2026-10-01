@@ -1,0 +1,105 @@
+{
+  "schema": 1,
+  "suite": "LT-ROOMS",
+  "executor": "crow",
+  "api_owner": "cmsg",
+  "mls_owner": "cthr",
+  "connection_owner": "clnk",
+  "room_owner": "cmbl",
+  "transport": "real-tor",
+  "volatile_backends": [
+    "cmmr-memory",
+    "cvlk-valkey"
+  ],
+  "production_group_cap": 100,
+  "capacity_probe_sizes": [
+    42,
+    100,
+    150,
+    250,
+    500
+  ],
+  "required_artifacts": [
+    "source-and-lock-identities",
+    "signed-test-policy",
+    "cmsg-call-trace",
+    "openmls-epoch-trace",
+    "tor-bootstrap-and-circuit-trace",
+    "latency-samples",
+    "delivery-identities",
+    "resource-samples",
+    "restart-counter-trace",
+    "wasm-phone-runtime"
+  ],
+  "cases": [
+    {
+      "id": 1,
+      "name": "room-ramp",
+      "members": [
+        42,
+        100,
+        150,
+        250,
+        500
+      ],
+      "active_fraction": 0.25,
+      "messages_per_active_member_minute": 1,
+      "pass": {
+        "message_latency_p99_ms_lt": 1000,
+        "dropped_deliveries": 0
+      }
+    },
+    {
+      "id": 2,
+      "name": "join-storm",
+      "joins_per_60s": [
+        20,
+        100
+      ],
+      "pass": {
+        "epoch_convergence_p99_ms_lte": 3000,
+        "max_commit_retries_lte": 3
+      }
+    },
+    {
+      "id": 3,
+      "name": "fork-over-tor",
+      "members": 150,
+      "movers": 60,
+      "pass": {
+        "all_movers_new_epoch_ms_lte": 60000
+      }
+    },
+    {
+      "id": 4,
+      "name": "low-end-phone-wasm",
+      "members": 500,
+      "runtime": "actual-low-end-phone",
+      "pass": {
+        "commit_ms_lte": 50,
+        "memory_mb_lt": 60
+      }
+    },
+    {
+      "id": 5,
+      "name": "presence-scale",
+      "connections": 10000,
+      "renewals": true,
+      "pass": {
+        "cfrm_cpu_percent_lt": 50,
+        "valkey_cpu_percent_lt": 50,
+        "renewal_latency_p99_ms_lt": 200
+      }
+    },
+    {
+      "id": 6,
+      "name": "volatile-restart",
+      "restart": "cfrm-with-volatile-state-loss",
+      "pass": {
+        "resume_ms_lte": 30000,
+        "counter_rollback": 0,
+        "additional_member_disclosure": 0
+      }
+    }
+  ]
+}
