@@ -34,11 +34,14 @@ pub enum Phase {
 #[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct OrderRequest {
     pub room: [u8; 16],
+    /// Assembly's volatile ordering generation, distinct from the MLS epoch.
+    pub ordering: [u8; 16],
     pub expected: u64,
     pub encrypted_commit: Vec<u8>,
 }
 #[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct OrderReply {
+    pub ordering: [u8; 16],
     pub counter: u64,
     pub proof: Vec<u8>,
 }
@@ -51,11 +54,13 @@ pub trait Link {
 /// No public constructors: real MLS and ordered evidence must first be adapted
 /// and independently reviewed at the Threads integration boundary.
 pub struct PreparedJoin {
+    ordering: [u8; 16],
     expected_counter: u64,
     encrypted_commit: Vec<u8>,
     epoch: u64,
 }
 pub struct OrderedJoin {
+    ordering: [u8; 16],
     counter: u64,
     epoch: u64,
     encrypted_handover: Vec<Vec<u8>>,
@@ -99,6 +104,7 @@ pub struct Checkpoint {
     membership_revision: u64,
     local_revision: u64,
     epoch: u64,
+    ordering: [u8; 16],
     counter: u64,
     pending: Option<OrderRequest>,
 }
@@ -132,6 +138,7 @@ impl Attend {
                 membership_revision: 0,
                 local_revision: 0,
                 epoch: 0,
+                ordering: [0; 16],
                 counter: 0,
                 pending: None,
             },
@@ -215,13 +222,15 @@ impl Attend {
         let prepared = threads
             .prepare(&self.checkpoint.group, self.checkpoint.membership_revision)
             .await?;
-        if prepared.encrypted_commit.is_empty() {
+        if prepared.encrypted_commit.is_empty() || prepared.ordering == [0; 16] {
             return Err(Error::Authority);
         }
         let mut next = self.checkpoint.clone();
         next.epoch = prepared.epoch;
+        next.ordering = prepared.ordering;
         next.pending = Some(OrderRequest {
             room: next.room,
+            ordering: prepared.ordering,
             expected: prepared.expected_counter,
             encrypted_commit: prepared.encrypted_commit,
         });
@@ -243,6 +252,12 @@ impl Attend {
         self.current(source, now)?;
         let pending = self.checkpoint.pending.as_ref().ok_or(Error::Invalid)?;
         let reply = link.order(pending).await?;
+        if reply.ordering != pending.ordering
+            || pending.expected.checked_add(1) != Some(reply.counter)
+        {
+            self.checkpoint.phase = Phase::Reconciling;
+            return Err(Error::Reconcile);
+        }
         self.checkpoint.phase = Phase::AwaitingOrderedCommit;
         Ok(reply)
     }
@@ -259,8 +274,15 @@ impl Attend {
         }
         self.current(source, now)?;
         let pending = self.checkpoint.pending.as_ref().ok_or(Error::Invalid)?;
+        if reply.ordering != pending.ordering
+            || pending.expected.checked_add(1) != Some(reply.counter)
+        {
+            self.checkpoint.phase = Phase::Reconciling;
+            return Err(Error::Reconcile);
+        }
         let evidence = threads.verify_order(pending, reply).await?;
-        if pending.expected.checked_add(1) != Some(evidence.counter)
+        if evidence.ordering != pending.ordering
+            || evidence.counter != reply.counter
             || evidence.epoch != self.checkpoint.epoch
         {
             self.checkpoint.phase = Phase::Reconciling;
