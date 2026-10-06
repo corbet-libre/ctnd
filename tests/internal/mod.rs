@@ -50,6 +50,7 @@ fn beginning() -> Attend {
 // Explicit internal MLS/order preconditions, inaccessible in production. These
 // exercise Attend coordination only; they are not MLS, proof or network tests.
 struct Preconditions {
+    ordering: [u8; 16],
     counter: u64,
     epoch: u64,
     empty: bool,
@@ -58,6 +59,7 @@ struct Preconditions {
 impl Default for Preconditions {
     fn default() -> Self {
         Self {
+            ordering: [2; 16],
             counter: 9,
             epoch: 2,
             empty: false,
@@ -72,6 +74,7 @@ impl Threads for Preconditions {
                 return Err(Error::Unavailable);
             }
             Ok(PreparedJoin {
+                ordering: self.ordering,
                 expected_counter: 8,
                 epoch: 2,
                 encrypted_commit: if self.empty { vec![] } else { vec![1, 2, 3] },
@@ -88,6 +91,7 @@ impl Threads for Preconditions {
                 return Err(Error::Unavailable);
             }
             Ok(OrderedJoin {
+                ordering: self.ordering,
                 counter: self.counter,
                 epoch: self.epoch,
                 encrypted_handover: vec![vec![7, 8, 9]],
@@ -99,6 +103,8 @@ impl Threads for Preconditions {
 struct LinkBoundary {
     sent: Vec<Vec<u8>>,
     refuse: bool,
+    ordering: Option<[u8; 16]>,
+    counter: Option<u64>,
 }
 impl Link for LinkBoundary {
     fn order<'a>(&'a mut self, r: &'a OrderRequest) -> PortFuture<'a, OrderReply> {
@@ -108,7 +114,8 @@ impl Link for LinkBoundary {
                 return Err(Error::Unavailable);
             }
             Ok(OrderReply {
-                counter: 9,
+                ordering: self.ordering.unwrap_or(r.ordering),
+                counter: self.counter.unwrap_or(9),
                 proof: vec![],
             })
         })
@@ -281,6 +288,7 @@ vector!(phase_and_proof_refusals_never_create_join_authority, {
     let mut threads = Preconditions::default();
     let mut link = LinkBoundary::default();
     let reply = OrderReply {
+        ordering: [2; 16],
         counter: 9,
         proof: vec![],
     };
@@ -468,4 +476,78 @@ vector!(cancelled_checkpoint_stays_in_reconciliation, {
         assert!(pending.as_mut().poll(&mut context).is_pending());
     }
     assert_eq!(a.phase(), &Phase::Reconciling);
+});
+
+vector!(volatile_restart_and_swapped_order_never_publish_a_join, {
+    let policy = SignedPolicy::new(&policy());
+    for (ordering, counter) in [([3; 16], 9), ([2; 16], 8), ([2; 16], 10)] {
+        let mut attend = beginning();
+        let mut database = Database::new().await;
+        let mut threads = Preconditions::default();
+        attend
+            .prepare_join(&mut threads, &mut database, &policy, 0)
+            .await
+            .unwrap();
+        assert_eq!(database.checkpoint().ordering, [2; 16]);
+        let mut link = LinkBoundary {
+            ordering: Some(ordering),
+            counter: Some(counter),
+            ..Default::default()
+        };
+        assert!(matches!(
+            attend.order(&mut link, &policy, 0).await,
+            Err(Error::Reconcile)
+        ));
+        assert_eq!(attend.phase(), &Phase::Reconciling);
+        assert_eq!(attend.admitting_peer_offline(), Err(Error::Invalid));
+        assert!(database.store.load_pending().unwrap().is_empty());
+        assert_eq!(database.checkpoint().phase, Phase::Joining);
+    }
+    let mut attend = beginning();
+    let mut database = Database::new().await;
+    let mut threads = Preconditions {
+        ordering: [0; 16],
+        ..Default::default()
+    };
+    assert_eq!(
+        attend
+            .prepare_join(&mut threads, &mut database, &policy, 0)
+            .await,
+        Err(Error::Authority)
+    );
+    threads.ordering = [2; 16];
+    attend
+        .prepare_join(&mut threads, &mut database, &policy, 0)
+        .await
+        .unwrap();
+    let reply = attend
+        .order(&mut LinkBoundary::default(), &policy, 0)
+        .await
+        .unwrap();
+    // Equal numeric counters from another generation cannot be substituted
+    // between transport receipt and publication, even before MLS verification.
+    let swapped = OrderReply {
+        ordering: [3; 16],
+        counter: reply.counter,
+        proof: reply.proof.clone(),
+    };
+    assert_eq!(
+        attend
+            .accept(&swapped, &mut UnavailableThreads, &mut database, &policy, 0)
+            .await,
+        Err(Error::Reconcile)
+    );
+    assert!(database.store.load_pending().unwrap().is_empty());
+    // Internal transition preconditions only: a successful future owner
+    // verifier must return evidence for this exact generation as well.
+    attend.checkpoint.phase = Phase::AwaitingOrderedCommit;
+    threads.ordering = [3; 16];
+    assert_eq!(
+        attend
+            .accept(&reply, &mut threads, &mut database, &policy, 0)
+            .await,
+        Err(Error::Reconcile)
+    );
+    assert_eq!(attend.phase(), &Phase::Reconciling);
+    assert!(database.store.load_pending().unwrap().is_empty());
 });

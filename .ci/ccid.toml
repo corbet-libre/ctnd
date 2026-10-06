@@ -1,6 +1,26 @@
 schema = 1
 project = "ctnd"
 
+[checks.resolve]
+kind = "commands"
+commands = [["bash", ".ci/check.sh", "resolve"]]
+
+[checks.native]
+kind = "commands"
+commands = [["bash", ".ci/check.sh", "native"]]
+
+[checks.browser]
+kind = "commands"
+commands = [["bash", ".ci/check.sh", "browser"]]
+
+[checks.coverage]
+kind = "commands"
+commands = [["bash", ".ci/check.sh", "coverage"]]
+
+[checks.dependency-policy]
+kind = "commands"
+commands = [["bash", ".ci/check.sh", "dependency-policy"]]
+
 [checks.lt-rooms]
 kind = "commands"
 commands = [["python3", ".ci/lt-rooms.py"]]
