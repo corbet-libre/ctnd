@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 license = "LGPL-3.0-only WITH LGPL-3.0-linking-exception"
 description = "Attend public-room state machine"
-repository = "https://github.com/corbet-foss/ctnd"
+repository = "https://git.corbet.ch/corbet-foss/ctnd"
 publish = false
 
 [dependencies]
@@ -12,12 +12,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 schemars = "1"
-cgrp = { git = "https://github.com/corbet-foss/cgrp", branch = "main" }
+cgrp = { git = "https://git.corbet.ch/corbet-foss/cgrp", branch = "main" }
 
 [dev-dependencies]
-cwst = { git = "https://github.com/corbet-foss/cwst", branch = "main" }
+cwst = { git = "https://git.corbet.ch/corbet-foss/cwst", branch = "main" }
 futures = "0.3"
-ckmg = { git = "https://github.com/corbet-foss/ckmg", branch = "main" }
+ckmg = { git = "https://git.corbet.ch/corbet-foss/ckmg", branch = "main" }
 ed25519-dalek = "3"
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 wasm-bindgen-test = "0.3"
