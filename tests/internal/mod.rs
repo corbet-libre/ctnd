@@ -551,3 +551,15 @@ vector!(volatile_restart_and_swapped_order_never_publish_a_join, {
     assert_eq!(attend.phase(), &Phase::Reconciling);
     assert!(database.store.load_pending().unwrap().is_empty());
 });
+
+#[test]
+fn join_evidence_constructors_refuse_empty_or_unbound_input() {
+    assert!(PreparedJoin::new([0; 16], 0, vec![1], 1).is_err());
+    assert!(PreparedJoin::new([1; 16], 0, vec![], 1).is_err());
+    assert!(PreparedJoin::new([1; 16], 0, vec![1], 1).is_ok());
+    assert!(OrderedJoin::new([0; 16], 1, 1, vec![]).is_err());
+    assert!(OrderedJoin::new([1; 16], 0, 1, vec![]).is_err());
+    assert!(OrderedJoin::new([1; 16], 1, 1, vec![vec![]]).is_err());
+    assert!(OrderedJoin::new([1; 16], 1, 1, vec![vec![1]; MAX_HANDOVER_ITEMS + 1]).is_err());
+    assert!(OrderedJoin::new([1; 16], 1, 1, vec![vec![1]]).is_ok());
+}

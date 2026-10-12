@@ -66,6 +66,58 @@ pub struct OrderedJoin {
     encrypted_handover: Vec<Vec<u8>>,
 }
 
+/// Largest encrypted hand-over (profile keys plus bounded history) per join.
+pub const MAX_HANDOVER_ITEMS: usize = 256;
+
+impl PreparedJoin {
+    /// For the Threads adapter only: the MLS commit it just produced for this
+    /// join. Attend still refuses an empty commit or a zero ordering generation
+    /// and binds the commit to the Groups decision; this constructor grants no
+    /// membership by itself.
+    pub fn new(
+        ordering: [u8; 16],
+        expected_counter: u64,
+        encrypted_commit: Vec<u8>,
+        epoch: u64,
+    ) -> Result<Self> {
+        if ordering == [0; 16] || encrypted_commit.is_empty() {
+            return Err(Error::Authority);
+        }
+        Ok(Self {
+            ordering,
+            expected_counter,
+            encrypted_commit,
+            epoch,
+        })
+    }
+}
+
+impl OrderedJoin {
+    /// For the Threads adapter only: evidence it verified from the exact ordered
+    /// reply (MLS epoch and ordering generation). Attend compares every field with
+    /// its own pending request before it records the join.
+    pub fn new(
+        ordering: [u8; 16],
+        counter: u64,
+        epoch: u64,
+        encrypted_handover: Vec<Vec<u8>>,
+    ) -> Result<Self> {
+        if ordering == [0; 16]
+            || counter == 0
+            || encrypted_handover.len() > MAX_HANDOVER_ITEMS
+            || encrypted_handover.iter().any(Vec::is_empty)
+        {
+            return Err(Error::Authority);
+        }
+        Ok(Self {
+            ordering,
+            counter,
+            epoch,
+            encrypted_handover,
+        })
+    }
+}
+
 pub trait Threads {
     fn prepare<'a>(
         &'a mut self,
