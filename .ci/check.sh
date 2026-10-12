@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+exec 2>&1
 : "${CI:?CI only}"
 export CARGO_BUILD_JOBS=2 CARGO_NET_GIT_FETCH_WITH_CLI=true
 trap 'sha256sum Cargo.lock' EXIT
