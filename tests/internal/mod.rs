@@ -50,6 +50,7 @@ fn beginning() -> Attend {
 // Explicit internal MLS/order preconditions, inaccessible in production. These
 // exercise Attend coordination only; they are not MLS, proof or network tests.
 struct Preconditions {
+    ordering: [u8; 16],
     counter: u64,
     epoch: u64,
     empty: bool,
@@ -58,6 +59,7 @@ struct Preconditions {
 impl Default for Preconditions {
     fn default() -> Self {
         Self {
+            ordering: [2; 16],
             counter: 9,
             epoch: 2,
             empty: false,
@@ -72,9 +74,11 @@ impl Threads for Preconditions {
                 return Err(Error::Unavailable);
             }
             Ok(PreparedJoin {
+                ordering: self.ordering,
                 expected_counter: 8,
                 epoch: 2,
                 encrypted_commit: if self.empty { vec![] } else { vec![1, 2, 3] },
+                companion: vec![],
             })
         })
     }
@@ -88,6 +92,7 @@ impl Threads for Preconditions {
                 return Err(Error::Unavailable);
             }
             Ok(OrderedJoin {
+                ordering: self.ordering,
                 counter: self.counter,
                 epoch: self.epoch,
                 encrypted_handover: vec![vec![7, 8, 9]],
@@ -99,6 +104,8 @@ impl Threads for Preconditions {
 struct LinkBoundary {
     sent: Vec<Vec<u8>>,
     refuse: bool,
+    ordering: Option<[u8; 16]>,
+    counter: Option<u64>,
 }
 impl Link for LinkBoundary {
     fn order<'a>(&'a mut self, r: &'a OrderRequest) -> PortFuture<'a, OrderReply> {
@@ -108,7 +115,8 @@ impl Link for LinkBoundary {
                 return Err(Error::Unavailable);
             }
             Ok(OrderReply {
-                counter: 9,
+                ordering: self.ordering.unwrap_or(r.ordering),
+                counter: self.counter.unwrap_or(9),
                 proof: vec![],
             })
         })
@@ -251,6 +259,11 @@ vector!(real_encrypted_checkpoint_precedes_retry_and_handover, {
     let mut threads = Preconditions::default();
     a.prepare_join(&mut threads, &mut db, &p, 0).await.unwrap();
     assert_eq!(db.checkpoint().phase, Phase::Joining);
+    assert_eq!(db.checkpoint().phase(), &Phase::Joining);
+    assert_eq!(
+        db.checkpoint().local_revision(),
+        db.checkpoint().local_revision
+    );
     let raw = db.backend.read().await.unwrap().unwrap();
     assert!(!raw.windows(14).any(|x| x == b"test-community"));
     let mut link = LinkBoundary::default();
@@ -275,12 +288,57 @@ vector!(real_encrypted_checkpoint_precedes_retry_and_handover, {
     a.begin(&c.prepare_effects()[0], "m0", [1; 16], &p, 0)
         .unwrap();
 });
+vector!(
+    a_stored_checkpoint_restores_for_withdrawal_and_a_lost_attempt_never_resumes,
+    {
+        let p = SignedPolicy::new(&policy());
+        let mut a = beginning();
+        let mut db = Database::new().await;
+        let mut threads = Preconditions::default();
+        a.prepare_join(&mut threads, &mut db, &p, 0).await.unwrap();
+        // A Joining checkpoint is a lost in-memory operation: reconcile, never resume.
+        let lost = Attend::restore(db.checkpoint());
+        assert_eq!(lost.phase(), &Phase::Reconciling);
+        let mut link = LinkBoundary::default();
+        let reply = a.order(&mut link, &p, 0).await.unwrap();
+        a.accept(&reply, &mut threads, &mut db, &p, 0)
+            .await
+            .unwrap();
+        let mut restored = Attend::restore(db.checkpoint());
+        assert_eq!(restored.phase(), &Phase::Joined);
+        assert_eq!(restored.checkpoint().room(), [1; 16]);
+        restored.withdraw(&mut db).await.unwrap();
+        assert_eq!(restored.phase(), &Phase::Withdrawn);
+    }
+);
+vector!(
+    a_companion_travels_with_the_commit_and_malformed_frames_are_refused,
+    {
+        assert_eq!(pack_ordered(&[0, 1, 9], &[]), vec![0, 1, 9]);
+        assert_eq!(unpack_ordered(&[0, 1, 9]), Some((&[0, 1, 9][..], &[][..])));
+        let frame = pack_ordered(&[0, 1, 9], &[5, 6]);
+        assert_eq!(unpack_ordered(&frame), Some((&[0, 1, 9][..], &[5, 6][..])));
+        // Magic with no companion, a zero or overlong commit length, a short header.
+        let mut bad = pack_ordered(&[0, 1, 9], &[5]);
+        bad.pop();
+        assert_eq!(unpack_ordered(&bad), None);
+        assert_eq!(unpack_ordered(&frame[..frame.len() - 2]), None);
+        assert_eq!(unpack_ordered(&frame[..20]), None);
+        assert!(
+            PreparedJoin::new([1; 16], 0, vec![1], 1)
+                .unwrap()
+                .with_companion(vec![0; MAX_COMPANION + 1])
+                .is_err()
+        );
+    }
+);
 vector!(phase_and_proof_refusals_never_create_join_authority, {
     let p = SignedPolicy::new(&policy());
     let mut db = Database::new().await;
     let mut threads = Preconditions::default();
     let mut link = LinkBoundary::default();
     let reply = OrderReply {
+        ordering: [2; 16],
         counter: 9,
         proof: vec![],
     };
@@ -469,3 +527,89 @@ vector!(cancelled_checkpoint_stays_in_reconciliation, {
     }
     assert_eq!(a.phase(), &Phase::Reconciling);
 });
+
+vector!(volatile_restart_and_swapped_order_never_publish_a_join, {
+    let policy = SignedPolicy::new(&policy());
+    for (ordering, counter) in [([3; 16], 9), ([2; 16], 8), ([2; 16], 10)] {
+        let mut attend = beginning();
+        let mut database = Database::new().await;
+        let mut threads = Preconditions::default();
+        attend
+            .prepare_join(&mut threads, &mut database, &policy, 0)
+            .await
+            .unwrap();
+        assert_eq!(database.checkpoint().ordering, [2; 16]);
+        let mut link = LinkBoundary {
+            ordering: Some(ordering),
+            counter: Some(counter),
+            ..Default::default()
+        };
+        assert!(matches!(
+            attend.order(&mut link, &policy, 0).await,
+            Err(Error::Reconcile)
+        ));
+        assert_eq!(attend.phase(), &Phase::Reconciling);
+        assert_eq!(attend.admitting_peer_offline(), Err(Error::Invalid));
+        assert!(database.store.load_pending().unwrap().is_empty());
+        assert_eq!(database.checkpoint().phase, Phase::Joining);
+    }
+    let mut attend = beginning();
+    let mut database = Database::new().await;
+    let mut threads = Preconditions {
+        ordering: [0; 16],
+        ..Default::default()
+    };
+    assert_eq!(
+        attend
+            .prepare_join(&mut threads, &mut database, &policy, 0)
+            .await,
+        Err(Error::Authority)
+    );
+    threads.ordering = [2; 16];
+    attend
+        .prepare_join(&mut threads, &mut database, &policy, 0)
+        .await
+        .unwrap();
+    let reply = attend
+        .order(&mut LinkBoundary::default(), &policy, 0)
+        .await
+        .unwrap();
+    // Equal numeric counters from another generation cannot be substituted
+    // between transport receipt and publication, even before MLS verification.
+    let swapped = OrderReply {
+        ordering: [3; 16],
+        counter: reply.counter,
+        proof: reply.proof.clone(),
+    };
+    assert_eq!(
+        attend
+            .accept(&swapped, &mut UnavailableThreads, &mut database, &policy, 0)
+            .await,
+        Err(Error::Reconcile)
+    );
+    assert!(database.store.load_pending().unwrap().is_empty());
+    // Internal transition preconditions only: a successful future owner
+    // verifier must return evidence for this exact generation as well.
+    attend.checkpoint.phase = Phase::AwaitingOrderedCommit;
+    threads.ordering = [3; 16];
+    assert_eq!(
+        attend
+            .accept(&reply, &mut threads, &mut database, &policy, 0)
+            .await,
+        Err(Error::Reconcile)
+    );
+    assert_eq!(attend.phase(), &Phase::Reconciling);
+    assert!(database.store.load_pending().unwrap().is_empty());
+});
+
+#[test]
+fn join_evidence_constructors_refuse_empty_or_unbound_input() {
+    assert!(PreparedJoin::new([0; 16], 0, vec![1], 1).is_err());
+    assert!(PreparedJoin::new([1; 16], 0, vec![], 1).is_err());
+    assert!(PreparedJoin::new([1; 16], 0, vec![1], 1).is_ok());
+    assert!(OrderedJoin::new([0; 16], 1, 1, vec![]).is_err());
+    assert!(OrderedJoin::new([1; 16], 0, 1, vec![]).is_err());
+    assert!(OrderedJoin::new([1; 16], 1, 1, vec![vec![]]).is_err());
+    assert!(OrderedJoin::new([1; 16], 1, 1, vec![vec![1]; MAX_HANDOVER_ITEMS + 1]).is_err());
+    assert!(OrderedJoin::new([1; 16], 1, 1, vec![vec![1]]).is_ok());
+}

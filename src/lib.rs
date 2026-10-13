@@ -34,11 +34,18 @@ pub enum Phase {
 #[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct OrderRequest {
     pub room: [u8; 16],
+    /// Assembly's volatile ordering generation, distinct from the MLS epoch.
+    pub ordering: [u8; 16],
     pub expected: u64,
     pub encrypted_commit: Vec<u8>,
+    /// The newcomer's signed Groups `Join` request, the authenticated companion
+    /// of an external commit (the commit binds it in its authenticated data).
+    /// Empty for commits that carry none.
+    pub companion: Vec<u8>,
 }
 #[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct OrderReply {
+    pub ordering: [u8; 16],
     pub counter: u64,
     pub proof: Vec<u8>,
 }
@@ -51,14 +58,113 @@ pub trait Link {
 /// No public constructors: real MLS and ordered evidence must first be adapted
 /// and independently reviewed at the Threads integration boundary.
 pub struct PreparedJoin {
+    ordering: [u8; 16],
     expected_counter: u64,
     encrypted_commit: Vec<u8>,
+    companion: Vec<u8>,
     epoch: u64,
 }
 pub struct OrderedJoin {
+    ordering: [u8; 16],
     counter: u64,
     epoch: u64,
     encrypted_handover: Vec<Vec<u8>>,
+}
+
+/// Largest encrypted hand-over (profile keys plus bounded history) per join.
+pub const MAX_HANDOVER_ITEMS: usize = 256;
+
+impl PreparedJoin {
+    /// For the Threads adapter only: the MLS commit it just produced for this
+    /// join. Attend still refuses an empty commit or a zero ordering generation
+    /// and binds the commit to the Groups decision; this constructor grants no
+    /// membership by itself.
+    pub fn new(
+        ordering: [u8; 16],
+        expected_counter: u64,
+        encrypted_commit: Vec<u8>,
+        epoch: u64,
+    ) -> Result<Self> {
+        if ordering == [0; 16] || encrypted_commit.is_empty() {
+            return Err(Error::Authority);
+        }
+        Ok(Self {
+            ordering,
+            expected_counter,
+            encrypted_commit,
+            companion: vec![],
+            epoch,
+        })
+    }
+
+    /// Attach the companion the commit authenticates (see [`pack_ordered`]).
+    pub fn with_companion(mut self, companion: Vec<u8>) -> Result<Self> {
+        if companion.len() > MAX_COMPANION {
+            return Err(Error::Invalid);
+        }
+        self.companion = companion;
+        Ok(self)
+    }
+}
+
+/// Largest companion a join may attach.
+pub const MAX_COMPANION: usize = 16 * 1024;
+const ORDERED_MAGIC: &[u8] = b"ctnd.ordered.v1\0";
+
+/// The frame Assembly orders for a commit: the bare commit, or with a companion
+/// the magic, the commit length, the commit and the companion. A bare MLS
+/// message starts with its protocol version bytes, never with the magic.
+pub fn pack_ordered(commit: &[u8], companion: &[u8]) -> Vec<u8> {
+    if companion.is_empty() {
+        return commit.to_vec();
+    }
+    let mut frame = Vec::with_capacity(ORDERED_MAGIC.len() + 4 + commit.len() + companion.len());
+    frame.extend_from_slice(ORDERED_MAGIC);
+    frame.extend_from_slice(&(commit.len() as u32).to_be_bytes());
+    frame.extend_from_slice(commit);
+    frame.extend_from_slice(companion);
+    frame
+}
+
+/// Split an ordered frame into its commit and companion (empty when absent).
+/// `None` for a frame that claims the magic but is malformed.
+pub fn unpack_ordered(frame: &[u8]) -> Option<(&[u8], &[u8])> {
+    let Some(rest) = frame.strip_prefix(ORDERED_MAGIC) else {
+        return Some((frame, &[]));
+    };
+    let (length, rest) = rest.split_first_chunk::<4>()?;
+    let length = u32::from_be_bytes(*length) as usize;
+    if length == 0 || length > rest.len() || rest.len() == length {
+        return None;
+    }
+    let (commit, companion) = rest.split_at(length);
+    (companion.len() <= MAX_COMPANION).then_some((commit, companion))
+}
+
+impl OrderedJoin {
+    /// For the Threads adapter only: evidence it verified from the exact ordered
+    /// reply (MLS epoch and ordering generation). Attend compares every field with
+    /// its own pending request before it records the join.
+    pub fn new(
+        ordering: [u8; 16],
+        counter: u64,
+        epoch: u64,
+        encrypted_handover: Vec<Vec<u8>>,
+    ) -> Result<Self> {
+        if ordering == [0; 16]
+            || counter == 0
+            || encrypted_handover.len() > MAX_HANDOVER_ITEMS
+            || encrypted_handover.iter().any(Vec::is_empty)
+        {
+            return Err(Error::Authority);
+        }
+        Ok(Self {
+            ordering,
+            counter,
+            epoch,
+            encrypted_handover,
+        })
+    }
 }
 
 pub trait Threads {
@@ -99,8 +205,28 @@ pub struct Checkpoint {
     membership_revision: u64,
     local_revision: u64,
     epoch: u64,
+    ordering: [u8; 16],
     counter: u64,
     pending: Option<OrderRequest>,
+}
+
+impl Checkpoint {
+    /// The phase this checkpoint records. Read-only: it grants nothing.
+    pub fn phase(&self) -> &Phase {
+        &self.phase
+    }
+    /// The room this checkpoint belongs to. Read-only.
+    pub fn room(&self) -> [u8; 16] {
+        self.room
+    }
+    /// The group this checkpoint belongs to. Read-only.
+    pub fn group(&self) -> [u8; 32] {
+        self.group
+    }
+    /// Revision of this checkpoint for compare-and-swap in the owner.
+    pub fn local_revision(&self) -> u64 {
+        self.local_revision
+    }
 }
 
 /// Combined cwst transaction with the owning Groups/Threads candidate and
@@ -132,6 +258,7 @@ impl Attend {
                 membership_revision: 0,
                 local_revision: 0,
                 epoch: 0,
+                ordering: [0; 16],
                 counter: 0,
                 pending: None,
             },
@@ -139,6 +266,26 @@ impl Attend {
     }
     pub fn phase(&self) -> &Phase {
         &self.checkpoint.phase
+    }
+
+    /// Resume from the checkpoint the owner stored. Only a durable record can
+    /// be restored: the in-memory two-commit operation of a Joining attempt is
+    /// never resumed, so such a checkpoint comes back as `Reconciling` and only
+    /// the owner's reconciliation (discard and restart) moves it on.
+    pub fn restore(mut checkpoint: Checkpoint) -> Self {
+        if matches!(
+            checkpoint.phase,
+            Phase::ConsentPending | Phase::Joining | Phase::AwaitingOrderedCommit
+        ) {
+            checkpoint.phase = Phase::Reconciling;
+            checkpoint.pending = None;
+        }
+        Self { checkpoint }
+    }
+
+    /// The checkpoint as the owner stores it.
+    pub fn checkpoint(&self) -> &Checkpoint {
+        &self.checkpoint
     }
 
     /// A genuine Groups preparation is necessary but is not a committed join.
@@ -215,15 +362,18 @@ impl Attend {
         let prepared = threads
             .prepare(&self.checkpoint.group, self.checkpoint.membership_revision)
             .await?;
-        if prepared.encrypted_commit.is_empty() {
+        if prepared.encrypted_commit.is_empty() || prepared.ordering == [0; 16] {
             return Err(Error::Authority);
         }
         let mut next = self.checkpoint.clone();
         next.epoch = prepared.epoch;
+        next.ordering = prepared.ordering;
         next.pending = Some(OrderRequest {
             room: next.room,
+            ordering: prepared.ordering,
             expected: prepared.expected_counter,
             encrypted_commit: prepared.encrypted_commit,
+            companion: prepared.companion,
         });
         next.phase = Phase::Joining;
         self.persist(next, &[], store).await
@@ -243,6 +393,12 @@ impl Attend {
         self.current(source, now)?;
         let pending = self.checkpoint.pending.as_ref().ok_or(Error::Invalid)?;
         let reply = link.order(pending).await?;
+        if reply.ordering != pending.ordering
+            || pending.expected.checked_add(1) != Some(reply.counter)
+        {
+            self.checkpoint.phase = Phase::Reconciling;
+            return Err(Error::Reconcile);
+        }
         self.checkpoint.phase = Phase::AwaitingOrderedCommit;
         Ok(reply)
     }
@@ -259,8 +415,15 @@ impl Attend {
         }
         self.current(source, now)?;
         let pending = self.checkpoint.pending.as_ref().ok_or(Error::Invalid)?;
+        if reply.ordering != pending.ordering
+            || pending.expected.checked_add(1) != Some(reply.counter)
+        {
+            self.checkpoint.phase = Phase::Reconciling;
+            return Err(Error::Reconcile);
+        }
         let evidence = threads.verify_order(pending, reply).await?;
-        if pending.expected.checked_add(1) != Some(evidence.counter)
+        if evidence.ordering != pending.ordering
+            || evidence.counter != reply.counter
             || evidence.epoch != self.checkpoint.epoch
         {
             self.checkpoint.phase = Phase::Reconciling;

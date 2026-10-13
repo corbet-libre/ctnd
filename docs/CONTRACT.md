@@ -13,3 +13,12 @@ same-epoch policy renewal cannot extend the consent. Checkpoints store the
 original bound; production loaders must restore it without modification.
 Persist-before-order and reconciliation-before-await also cover cancellation.
 Already committed encrypted outbox delivery is distinct from a pending join.
+
+Pending joins bind Assembly's nonzero volatile ordering generation in addition
+to its next counter. A restart can repeat a numeric counter; that does not make
+the new generation interchangeable with the member's retained request. Both
+the Link reply and sealed Threads evidence must match the retained generation
+and next counter. A mismatch enters Reconciling before any handover is released.
+The generation is not an MLS epoch, membership proof or permission to resume
+without checking other members. Older checkpoint encodings lack this mandatory
+field and must refuse rather than defaulting to a current room generation.
