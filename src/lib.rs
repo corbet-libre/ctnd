@@ -161,6 +161,17 @@ pub struct Checkpoint {
     pending: Option<OrderRequest>,
 }
 
+impl Checkpoint {
+    /// The phase this checkpoint records. Read-only: it grants nothing.
+    pub fn phase(&self) -> &Phase {
+        &self.phase
+    }
+    /// Revision of this checkpoint for compare-and-swap in the owner.
+    pub fn local_revision(&self) -> u64 {
+        self.local_revision
+    }
+}
+
 /// Combined cwst transaction with the owning Groups/Threads candidate and
 /// encrypted handover outbox. Unknown outcomes must return Storage and reload.
 /// This object represents that already-prepared shared transaction, not a

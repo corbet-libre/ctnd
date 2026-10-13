@@ -258,6 +258,11 @@ vector!(real_encrypted_checkpoint_precedes_retry_and_handover, {
     let mut threads = Preconditions::default();
     a.prepare_join(&mut threads, &mut db, &p, 0).await.unwrap();
     assert_eq!(db.checkpoint().phase, Phase::Joining);
+    assert_eq!(db.checkpoint().phase(), &Phase::Joining);
+    assert_eq!(
+        db.checkpoint().local_revision(),
+        db.checkpoint().local_revision
+    );
     let raw = db.backend.read().await.unwrap().unwrap();
     assert!(!raw.windows(14).any(|x| x == b"test-community"));
     let mut link = LinkBoundary::default();
