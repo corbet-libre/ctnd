@@ -78,6 +78,7 @@ impl Threads for Preconditions {
                 expected_counter: 8,
                 epoch: 2,
                 encrypted_commit: if self.empty { vec![] } else { vec![1, 2, 3] },
+                companion: vec![],
             })
         })
     }
@@ -287,6 +288,50 @@ vector!(real_encrypted_checkpoint_precedes_retry_and_handover, {
     a.begin(&c.prepare_effects()[0], "m0", [1; 16], &p, 0)
         .unwrap();
 });
+vector!(
+    a_stored_checkpoint_restores_for_withdrawal_and_a_lost_attempt_never_resumes,
+    {
+        let p = SignedPolicy::new(&policy());
+        let mut a = beginning();
+        let mut db = Database::new().await;
+        let mut threads = Preconditions::default();
+        a.prepare_join(&mut threads, &mut db, &p, 0).await.unwrap();
+        // A Joining checkpoint is a lost in-memory operation: reconcile, never resume.
+        let lost = Attend::restore(db.checkpoint());
+        assert_eq!(lost.phase(), &Phase::Reconciling);
+        let mut link = LinkBoundary::default();
+        let reply = a.order(&mut link, &p, 0).await.unwrap();
+        a.accept(&reply, &mut threads, &mut db, &p, 0)
+            .await
+            .unwrap();
+        let mut restored = Attend::restore(db.checkpoint());
+        assert_eq!(restored.phase(), &Phase::Joined);
+        assert_eq!(restored.checkpoint().room(), [1; 16]);
+        restored.withdraw(&mut db).await.unwrap();
+        assert_eq!(restored.phase(), &Phase::Withdrawn);
+    }
+);
+vector!(
+    a_companion_travels_with_the_commit_and_malformed_frames_are_refused,
+    {
+        assert_eq!(pack_ordered(&[0, 1, 9], &[]), vec![0, 1, 9]);
+        assert_eq!(unpack_ordered(&[0, 1, 9]), Some((&[0, 1, 9][..], &[][..])));
+        let frame = pack_ordered(&[0, 1, 9], &[5, 6]);
+        assert_eq!(unpack_ordered(&frame), Some((&[0, 1, 9][..], &[5, 6][..])));
+        // Magic with no companion, a zero or overlong commit length, a short header.
+        let mut bad = pack_ordered(&[0, 1, 9], &[5]);
+        bad.pop();
+        assert_eq!(unpack_ordered(&bad), None);
+        assert_eq!(unpack_ordered(&frame[..frame.len() - 2]), None);
+        assert_eq!(unpack_ordered(&frame[..20]), None);
+        assert!(
+            PreparedJoin::new([1; 16], 0, vec![1], 1)
+                .unwrap()
+                .with_companion(vec![0; MAX_COMPANION + 1])
+                .is_err()
+        );
+    }
+);
 vector!(phase_and_proof_refusals_never_create_join_authority, {
     let p = SignedPolicy::new(&policy());
     let mut db = Database::new().await;

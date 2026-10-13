@@ -38,6 +38,10 @@ pub struct OrderRequest {
     pub ordering: [u8; 16],
     pub expected: u64,
     pub encrypted_commit: Vec<u8>,
+    /// The newcomer's signed Groups `Join` request, the authenticated companion
+    /// of an external commit (the commit binds it in its authenticated data).
+    /// Empty for commits that carry none.
+    pub companion: Vec<u8>,
 }
 #[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct OrderReply {
@@ -57,6 +61,7 @@ pub struct PreparedJoin {
     ordering: [u8; 16],
     expected_counter: u64,
     encrypted_commit: Vec<u8>,
+    companion: Vec<u8>,
     epoch: u64,
 }
 pub struct OrderedJoin {
@@ -87,9 +92,53 @@ impl PreparedJoin {
             ordering,
             expected_counter,
             encrypted_commit,
+            companion: vec![],
             epoch,
         })
     }
+
+    /// Attach the companion the commit authenticates (see [`pack_ordered`]).
+    pub fn with_companion(mut self, companion: Vec<u8>) -> Result<Self> {
+        if companion.len() > MAX_COMPANION {
+            return Err(Error::Invalid);
+        }
+        self.companion = companion;
+        Ok(self)
+    }
+}
+
+/// Largest companion a join may attach.
+pub const MAX_COMPANION: usize = 16 * 1024;
+const ORDERED_MAGIC: &[u8] = b"ctnd.ordered.v1\0";
+
+/// The frame Assembly orders for a commit: the bare commit, or with a companion
+/// the magic, the commit length, the commit and the companion. A bare MLS
+/// message starts with its protocol version bytes, never with the magic.
+pub fn pack_ordered(commit: &[u8], companion: &[u8]) -> Vec<u8> {
+    if companion.is_empty() {
+        return commit.to_vec();
+    }
+    let mut frame = Vec::with_capacity(ORDERED_MAGIC.len() + 4 + commit.len() + companion.len());
+    frame.extend_from_slice(ORDERED_MAGIC);
+    frame.extend_from_slice(&(commit.len() as u32).to_be_bytes());
+    frame.extend_from_slice(commit);
+    frame.extend_from_slice(companion);
+    frame
+}
+
+/// Split an ordered frame into its commit and companion (empty when absent).
+/// `None` for a frame that claims the magic but is malformed.
+pub fn unpack_ordered(frame: &[u8]) -> Option<(&[u8], &[u8])> {
+    let Some(rest) = frame.strip_prefix(ORDERED_MAGIC) else {
+        return Some((frame, &[]));
+    };
+    let (length, rest) = rest.split_first_chunk::<4>()?;
+    let length = u32::from_be_bytes(*length) as usize;
+    if length == 0 || length > rest.len() || rest.len() == length {
+        return None;
+    }
+    let (commit, companion) = rest.split_at(length);
+    (companion.len() <= MAX_COMPANION).then_some((commit, companion))
 }
 
 impl OrderedJoin {
@@ -166,6 +215,14 @@ impl Checkpoint {
     pub fn phase(&self) -> &Phase {
         &self.phase
     }
+    /// The room this checkpoint belongs to. Read-only.
+    pub fn room(&self) -> [u8; 16] {
+        self.room
+    }
+    /// The group this checkpoint belongs to. Read-only.
+    pub fn group(&self) -> [u8; 32] {
+        self.group
+    }
     /// Revision of this checkpoint for compare-and-swap in the owner.
     pub fn local_revision(&self) -> u64 {
         self.local_revision
@@ -209,6 +266,26 @@ impl Attend {
     }
     pub fn phase(&self) -> &Phase {
         &self.checkpoint.phase
+    }
+
+    /// Resume from the checkpoint the owner stored. Only a durable record can
+    /// be restored: the in-memory two-commit operation of a Joining attempt is
+    /// never resumed, so such a checkpoint comes back as `Reconciling` and only
+    /// the owner's reconciliation (discard and restart) moves it on.
+    pub fn restore(mut checkpoint: Checkpoint) -> Self {
+        if matches!(
+            checkpoint.phase,
+            Phase::ConsentPending | Phase::Joining | Phase::AwaitingOrderedCommit
+        ) {
+            checkpoint.phase = Phase::Reconciling;
+            checkpoint.pending = None;
+        }
+        Self { checkpoint }
+    }
+
+    /// The checkpoint as the owner stores it.
+    pub fn checkpoint(&self) -> &Checkpoint {
+        &self.checkpoint
     }
 
     /// A genuine Groups preparation is necessary but is not a committed join.
@@ -296,6 +373,7 @@ impl Attend {
             ordering: prepared.ordering,
             expected: prepared.expected_counter,
             encrypted_commit: prepared.encrypted_commit,
+            companion: prepared.companion,
         });
         next.phase = Phase::Joining;
         self.persist(next, &[], store).await
