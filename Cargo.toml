@@ -15,9 +15,9 @@ schemars = "1"
 cgrp = { git = "https://git.corbet.ch/corbet-foss/cgrp.git", branch = "main" }
 
 [dev-dependencies]
-cwst = { git = "https://git.corbet.ch/corbet-foss/cwst.git", branch = "v01" }
+cwst = { git = "https://git.corbet.ch/corbet-foss/cwst.git", branch = "main" }
 futures = "0.3"
-ckmg = { git = "https://git.corbet.ch/corbet-foss/ckmg.git", branch = "v01" }
+ckmg = { git = "https://git.corbet.ch/corbet-foss/ckmg.git", branch = "main" }
 ed25519-dalek = "3"
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 wasm-bindgen-test = "0.3"
