@@ -13,6 +13,7 @@ export GITHUB_PATH="${GITHUB_PATH:-$RUNNER_TEMP/github_path}"
 touch "$GITHUB_PATH"
 python3 .ci/lt-rooms.py --validate-contract
 python3 .github/check-first-party.py
+bash .ci/update-our-crates.sh
 cargo fmt --all
 git diff -- '*.rs' > "$ARTIFACT_ROOT/rustfmt.patch"
 test ! -s "$ARTIFACT_ROOT/rustfmt.patch"
