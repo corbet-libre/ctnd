@@ -10,20 +10,30 @@ macro_rules! vector {
         #[cfg(target_arch="wasm32")] #[wasm_bindgen_test::wasm_bindgen_test] async fn $name() $body
     };
 }
-fn decision(seed: bool) -> cgrp::Candidate {
-    let s = cgrp::Snapshot::empty("test-community".into());
-    let r = request(
-        &s,
-        cgrp::Command::Create {
-            id: [3; 32],
-            members: members(0, 3),
-            seed,
-        },
-        "m0",
-        members(0, 3),
-        true,
-        0,
-    );
+// A public room opens from an ingroup (Fork Open); a private group is a circle.
+fn decision(public: bool) -> cgrp::Candidate {
+    let (s, command, visible) = if public {
+        (
+            support::ingroup(42),
+            cgrp::Command::Fork {
+                id: [3; 32],
+                parents: vec![[2; 32]],
+                members: members(0, 3),
+                kind: cgrp::ForkKind::Open,
+            },
+            true,
+        )
+    } else {
+        (
+            cgrp::Snapshot::empty("test-community".into()),
+            cgrp::Command::Create {
+                id: [3; 32],
+                members: members(0, 3),
+            },
+            false,
+        )
+    };
+    let r = request(&s, command, "m0", members(0, 3), visible, 0);
     cgrp::prepare(
         &s,
         &r,
@@ -190,7 +200,7 @@ vector!(
             a.begin(&plans[0], "unknown", [1; 16], &p, 0),
             Err(Error::Authority)
         );
-        let expired = support::room(42, false);
+        let expired = support::room(42);
         let tick = request(
             &expired,
             cgrp::Command::Tick,
