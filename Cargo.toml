@@ -15,7 +15,7 @@ schemars = "1"
 cgrp = { git = "https://git.corbet.ch/corbet-libre/cgrp.git", branch = "main" }
 
 [dev-dependencies]
-cwst = { git = "https://git.corbet.ch/corbet-foss/cwst.git", branch = "main" }
+cwst = { git = "https://git.corbet.ch/corbet-libre/cwst.git", branch = "main" }
 futures = "0.3"
 ckmg = { git = "https://git.corbet.ch/corbet-libre/ckmg.git", branch = "main" }
 ed25519-dalek = "3"
